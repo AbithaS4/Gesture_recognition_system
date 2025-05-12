@@ -1,107 +1,97 @@
 import cv2
 import numpy as np
 
-# Initialize the camera
+# Initialize video capture
 cap = cv2.VideoCapture(0)
 
 # Background subtraction
-bg_subtractor = cv2.createBackgroundSubtractorMOG2(history=500, varThreshold=16, detectShadows=False)
-
-# Kernel for morphological operations
-kernel = np.ones((3, 3), np.uint8)
-
-# Minimum area threshold for contour detection
-min_contour_area = 10000
-
-# Gesture recognition history
-gesture_history = []
-
-def detect_gesture(frame):
-    # Apply background subtraction
-    fg_mask = bg_subtractor.apply(frame)
-    
-    # Apply threshold to get binary image
-    _, thresh = cv2.threshold(fg_mask, 127, 255, cv2.THRESH_BINARY)
-    
-    # Apply morphological operations to remove noise
-    thresh = cv2.erode(thresh, kernel, iterations=2)
-    thresh = cv2.dilate(thresh, kernel, iterations=2)
-    
-    # Find contours
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    if len(contours) == 0:
-        return None, frame
-    
-    # Get the largest contour
-    largest_contour = max(contours, key=cv2.contourArea)
-    
-    # Filter out small contours
-    if cv2.contourArea(largest_contour) < min_contour_area:
-        return None, frame
-    
-    # Draw the contour
-    cv2.drawContours(frame, [largest_contour], -1, (0, 255, 0), 2)
-    
-    # Convex hull and defects for hand gesture recognition
-    hull = cv2.convexHull(largest_contour, returnPoints=False)
-    defects = cv2.convexityDefects(largest_contour, hull)
-    
-    if defects is None:
-        return None, frame
-    
-    # Count fingers based on convexity defects
-    finger_count = 0
-    for i in range(defects.shape[0]):
-        s, e, f, d = defects[i, 0]
-        start = tuple(largest_contour[s][0])
-        end = tuple(largest_contour[e][0])
-        far = tuple(largest_contour[f][0])
-        
-        # Calculate angles between fingers
-        a = np.sqrt((end[0] - start[0])**2 + (end[1] - start[1])**2)
-        b = np.sqrt((far[0] - start[0])**2 + (far[1] - start[1])**2)
-        c = np.sqrt((end[0] - far[0])**2 + (end[1] - far[1])**2)
-        angle = np.arccos((b**2 + c**2 - a**2) / (2 * b * c)) * 57
-        
-        # Ignore wide angles and points that are too close
-        if angle <= 90 and d > 10000:
-            finger_count += 1
-            cv2.circle(frame, far, 4, [0, 0, 255], -1)
-    
-    # The finger count is usually defects + 1
-    if finger_count > 0:
-        finger_count += 1
-    
-    # Ensure finger count is between 0 and 5
-    finger_count = min(5, max(0, finger_count))
-    
-    return finger_count, frame
+bg_subtractor = cv2.createBackgroundSubtractorMOG2(history=500, varThreshold=25, detectShadows=False)
 
 while True:
     ret, frame = cap.read()
     if not ret:
         break
     
-    # Flip the frame horizontally for a mirror effect
+    # Flip the frame horizontally
     frame = cv2.flip(frame, 1)
     
-    # Detect gesture
-    gesture, output_frame = detect_gesture(frame)
+    # Define region of interest (ROI)
+    roi = frame[100:400, 100:400]
+    cv2.rectangle(frame, (100, 100), (400, 400), (0, 255, 0), 2)
     
-    if gesture is not None:
-        gesture_history.append(gesture)
-        if len(gesture_history) > 5:
-            gesture_history.pop(0)
+    # Apply background subtraction
+    fg_mask = bg_subtractor.apply(roi)
+    _, fg_mask = cv2.threshold(fg_mask, 200, 255, cv2.THRESH_BINARY)
+    
+    # Apply skin color detection in YCrCb space (better for skin detection)
+    ycrcb = cv2.cvtColor(roi, cv2.COLOR_BGR2YCrCb)
+    lower_skin = np.array([0, 135, 85], dtype=np.uint8)
+    upper_skin = np.array([255, 180, 135], dtype=np.uint8)
+    skin_mask = cv2.inRange(ycrcb, lower_skin, upper_skin)
+    
+    # Combine masks
+    final_mask = cv2.bitwise_and(fg_mask, skin_mask)
+    
+    # Apply morphological operations
+    kernel = np.ones((3, 3), np.uint8)
+    final_mask = cv2.erode(final_mask, kernel, iterations=1)
+    final_mask = cv2.dilate(final_mask, kernel, iterations=2)
+    final_mask = cv2.GaussianBlur(final_mask, (5, 5), 0)
+    
+    # Find contours
+    contours, _ = cv2.findContours(final_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    
+    if len(contours) > 0:
+        # Find the largest contour
+        max_contour = max(contours, key=lambda x: cv2.contourArea(x))
         
-        # Get the most frequent gesture in history
-        if len(gesture_history) > 0:
-            final_gesture = max(set(gesture_history), key=gesture_history.count)
-            cv2.putText(output_frame, f'Fingers: {final_gesture}', (10, 50), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
+        # Create convex hull
+        hull = cv2.convexHull(max_contour, returnPoints=False)
+        
+        # Find convexity defects
+        if len(hull) > 3:
+            defects = cv2.convexityDefects(max_contour, hull)
+            
+            if defects is not None:
+                finger_count = 0
+                defect_points = []
+                
+                for i in range(defects.shape[0]):
+                    s, e, f, d = defects[i, 0]
+                    start = tuple(max_contour[s][0])
+                    end = tuple(max_contour[e][0])
+                    far = tuple(max_contour[f][0])
+                    
+                    # Calculate triangle sides
+                    a = np.sqrt((end[0] - start[0])**2 + (end[1] - start[1])**2)
+                    b = np.sqrt((far[0] - start[0])**2 + (far[1] - start[1])**2)
+                    c = np.sqrt((end[0] - far[0])**2 + (end[1] - far[1])**2)
+                    
+                    # Calculate angle
+                    angle = np.arccos((b**2 + c**2 - a**2)/(2*b*c + 1e-10)) * 180/np.pi
+                    
+                    # Ignore angles > 90 degrees and points too close
+                    if angle < 90 and d > 10000:
+                        finger_count += 1
+                        defect_points.append(far)
+                
+                # Draw defects and count fingers
+                for point in defect_points:
+                    cv2.circle(roi, point, 8, [0, 255, 0], -1)
+                
+                # Adjust finger count (1 defect = 2 fingers, etc.)
+                finger_count = min(finger_count + 1, 5)
+                
+                # Display finger count
+                cv2.putText(frame, f"Fingers: {finger_count}", (50, 50), 
+                          cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                
+                # Draw contour
+                cv2.drawContours(roi, [max_contour], -1, (255, 0, 0), 2)
     
-    # Show the output
-    cv2.imshow('Gesture Recognition', output_frame)
+    # Show the frames
+    cv2.imshow('Mask', final_mask)
+    cv2.imshow('Frame', frame)
     
     # Exit on 'q' key press
     if cv2.waitKey(1) & 0xFF == ord('q'):
